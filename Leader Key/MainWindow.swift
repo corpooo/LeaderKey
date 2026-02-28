@@ -40,6 +40,7 @@ class MainWindow: PanelWindow, NSWindowDelegate {
   }
 
   func windowDidResignKey(_ notification: Notification) {
+    if controller.isInHoldToStickyMode { return }
     controller.hide()
   }
 

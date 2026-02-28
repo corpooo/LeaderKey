@@ -39,6 +39,13 @@ extension Defaults.Keys {
   static let groupShortcuts = Key<Set<String>>(
     "groupShortcuts",
     default: Set(), suite: defaultsSuite)
+
+  static let holdToStickyEnabled = Key<Bool>(
+    "holdToStickyEnabled", default: false, suite: defaultsSuite)
+  static let holdToStickyKeyCode = Key<Int>(
+    "holdToStickyKeyCode", default: -1, suite: defaultsSuite)
+  static let holdToStickyKeyDisplay = Key<String>(
+    "holdToStickyKeyDisplay", default: "", suite: defaultsSuite)
 }
 
 enum AutoOpenCheatsheetSetting: String, Defaults.Serializable {

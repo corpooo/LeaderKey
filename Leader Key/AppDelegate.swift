@@ -15,6 +15,7 @@ class AppDelegate: NSObject, NSApplicationDelegate,
   NSWindowDelegate
 {
   var controller: Controller!
+  var holdToStickyMonitor: HoldToStickyMonitor!
 
   let statusItem = StatusItem()
   let config = UserConfig()
@@ -90,6 +91,35 @@ class AppDelegate: NSObject, NSApplicationDelegate,
     // Activation policy is managed solely by the Settings window
 
     registerGlobalShortcuts()
+
+    holdToStickyMonitor = HoldToStickyMonitor()
+    holdToStickyMonitor.onKeyDown = { [weak self] firstKeyEvent in
+      guard let self = self else { return }
+      self.controller.isInHoldToStickyMode = true
+      if !self.controller.window.isVisible {
+        self.show()
+      }
+      if let event = firstKeyEvent {
+        self.controller.keyDown(with: event)
+      }
+    }
+    holdToStickyMonitor.onKeyUp = { [weak self] in
+      guard let self = self else { return }
+      self.controller.isInHoldToStickyMode = false
+      self.hide()
+    }
+    setupHoldToSticky()
+
+    Task {
+      for await _ in Defaults.updates(.holdToStickyEnabled) {
+        self.setupHoldToSticky()
+      }
+    }
+    Task {
+      for await _ in Defaults.updates(.holdToStickyKeyCode) {
+        self.setupHoldToSticky()
+      }
+    }
   }
 
   func activate() {
@@ -128,6 +158,17 @@ class AppDelegate: NSObject, NSApplicationDelegate,
     }
     if Defaults[.groupShortcuts].isEmpty && !KeyboardShortcuts.isEnabled(for: .activate) {
       showSettings()
+    }
+  }
+
+  private func setupHoldToSticky() {
+    let enabled = Defaults[.holdToStickyEnabled]
+    let keyCode = Defaults[.holdToStickyKeyCode]
+
+    if enabled && keyCode >= 0 {
+      holdToStickyMonitor.start(keyCode: keyCode)
+    } else {
+      holdToStickyMonitor.stop()
     }
   }
 

@@ -18,6 +18,7 @@ enum KeyHelpers: UInt16 {
 class Controller {
   var userState: UserState
   var userConfig: UserConfig
+  var isInHoldToStickyMode = false
 
   var window: MainWindow!
   var cheatsheetWindow: NSWindow!
@@ -160,7 +161,7 @@ class Controller {
     switch hit {
     case .action(let action):
       if execute {
-        if let mods = modifiers, isInStickyMode(mods) {
+        if isInHoldToStickyMode || (modifiers.map { isInStickyMode($0) } ?? false) {
           runAction(action)
         } else {
           hide {

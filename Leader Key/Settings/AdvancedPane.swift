@@ -16,6 +16,9 @@ struct AdvancedPane: View {
   @Default(.reactivateBehavior) var reactivateBehavior
   @Default(.showAppIconsInCheatsheet) var showAppIconsInCheatsheet
   @Default(.screen) var screen
+  @Default(.holdToStickyEnabled) var holdToStickyEnabled
+  @Default(.holdToStickyKeyCode) var holdToStickyKeyCode
+  @Default(.holdToStickyKeyDisplay) var holdToStickyKeyDisplay
 
   var body: some View {
     Settings.Container(contentWidth: contentWidth) {
@@ -73,6 +76,38 @@ struct AdvancedPane: View {
           VStack(alignment: .leading, spacing: 8) {
             Text(
               "Sticky Mode: When the modifier key is held while triggering an action, Leader Key stays open after the action completes."
+            )
+            .font(.callout)
+            .foregroundColor(.secondary)
+          }
+        }
+        .padding(.top, 2)
+      }
+
+      Settings.Section(title: "Hold-to-Sticky", bottomDivider: true) {
+        VStack(alignment: .leading, spacing: 8) {
+          Defaults.Toggle("Enable hold-to-sticky mode", key: .holdToStickyEnabled)
+
+          if holdToStickyEnabled {
+            HStack {
+              Text("Hold key:")
+              HoldKeyRecorderView()
+            }
+
+            if holdToStickyKeyCode < 0 || holdToStickyKeyDisplay.isEmpty {
+              HStack(spacing: 4) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                  .foregroundColor(.yellow)
+                Text(
+                  "No key set. Hold-to-sticky will not work until a key is configured."
+                )
+              }
+              .font(.callout)
+              .foregroundColor(.secondary)
+            }
+
+            Text(
+              "Hold the configured key to keep Leader Key visible. Execute multiple actions while held, then release to hide. The held key is suppressed globally while the feature is enabled."
             )
             .font(.callout)
             .foregroundColor(.secondary)
