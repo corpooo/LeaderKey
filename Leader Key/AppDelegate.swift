@@ -48,7 +48,6 @@ class AppDelegate: NSObject, NSApplicationDelegate,
     guard !isRunningTests() else { return }
 
     UNUserNotificationCenter.current().delegate = self
-
     NSApp.mainMenu = MainMenu()
 
     config.ensureAndLoad()

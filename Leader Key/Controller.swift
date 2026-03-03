@@ -78,9 +78,12 @@ class Controller {
 
   func hide(afterClose: (() -> Void)? = nil) {
     Events.send(.willDeactivate)
+    let shouldClearState = !isInHoldToStickyMode
 
     window.hide {
-      self.clear()
+      if shouldClearState {
+        self.clear()
+      }
       afterClose?()
       Events.send(.didDeactivate)
     }
@@ -134,42 +137,61 @@ class Controller {
       return
     }
 
-    let list =
-      (userState.currentGroup != nil)
-      ? userState.currentGroup : userConfig.root
+    let group = userState.currentGroup ?? userConfig.root
+    let hit = findMatch(for: key, in: group)
 
-    let hit = list?.actions.first { item in
-      switch item {
-      case .group(let group):
-        // Normalize both keys for comparison
-        let groupKey = KeyMaps.glyph(for: group.key ?? "") ?? group.key ?? ""
-        let inputKey = KeyMaps.glyph(for: key) ?? key
-        if groupKey == inputKey {
-          return true
-        }
-      case .action(let action):
-        // Normalize both keys for comparison
-        let actionKey = KeyMaps.glyph(for: action.key ?? "") ?? action.key ?? ""
-        let inputKey = KeyMaps.glyph(for: key) ?? key
-        if actionKey == inputKey {
-          return true
-        }
+    if handleHit(hit, withModifiers: modifiers, execute: execute) {
+      // Direct match in current group
+    } else if Defaults[.keyFallthroughEnabled],
+              !userState.navigationPath.isEmpty,
+              let fallthrough_ = findFallthroughMatch(for: key) {
+      // Reset navigation to ancestor level
+      if fallthrough_.ancestorIndex < 0 {
+        userState.navigationPath = []
+      } else {
+        userState.navigationPath = Array(userState.navigationPath.prefix(fallthrough_.ancestorIndex + 1))
       }
-      return false
+      _ = handleHit(fallthrough_.hit, withModifiers: modifiers, execute: execute)
+    } else {
+      window?.notFound()
     }
 
+    delay(1) {
+      self.positionCheatsheetWindow()
+    }
+  }
+
+  private func findMatch(for key: String, in group: Group) -> ActionOrGroup? {
+    return group.actions.first { item in
+      switch item {
+      case .group(let g):
+        let groupKey = KeyMaps.glyph(for: g.key ?? "") ?? g.key ?? ""
+        let inputKey = KeyMaps.glyph(for: key) ?? key
+        return groupKey == inputKey
+      case .action(let a):
+        let actionKey = KeyMaps.glyph(for: a.key ?? "") ?? a.key ?? ""
+        let inputKey = KeyMaps.glyph(for: key) ?? key
+        return actionKey == inputKey
+      }
+    }
+  }
+
+  @discardableResult
+  private func handleHit(_ hit: ActionOrGroup?, withModifiers modifiers: NSEvent.ModifierFlags?, execute: Bool) -> Bool {
     switch hit {
     case .action(let action):
       if execute {
-        if isInHoldToStickyMode || (modifiers.map { isInStickyMode($0) } ?? false) {
-          runAction(action)
+        let isStickyMode = isInHoldToStickyMode || (modifiers.map { isInStickyMode($0) } ?? false)
+        let shouldKeepFocus = isStickyMode
+        if shouldKeepFocus {
+          runAction(action, keepFocus: true)
         } else {
           hide {
             self.runAction(action)
           }
         }
       }
-      // If execute is false, just stay visible showing the matched action
+      return true
     case .group(let group):
       if execute, let mods = modifiers, shouldRunGroupSequenceWithModifiers(mods) {
         hide {
@@ -179,14 +201,25 @@ class Controller {
         userState.display = group.key
         userState.navigateToGroup(group)
       }
+      return true
     case .none:
-      window.notFound()
+      return false
     }
+  }
 
-    // Why do we need to wait here?
-    delay(1) {
-      self.positionCheatsheetWindow()
+  private func findFallthroughMatch(for key: String) -> (hit: ActionOrGroup, ancestorIndex: Int)? {
+    let path = userState.navigationPath
+    // Walk up from parent to root (skip current group at path.count-1)
+    for i in stride(from: path.count - 2, through: 0, by: -1) {
+      if let match = findMatch(for: key, in: path[i]) {
+        return (match, i)
+      }
     }
+    // Check root
+    if let match = findMatch(for: key, in: userConfig.root) {
+      return (match, -1)
+    }
+    return nil
   }
 
   private func shouldRunGroupSequence(_ event: NSEvent) -> Bool {
@@ -300,14 +333,19 @@ class Controller {
     }
   }
 
-  private func runAction(_ action: Action) {
+  private func runAction(_ action: Action, keepFocus: Bool = false) {
+    var openConfig = keepFocus
+      ? DontActivateConfiguration.shared.configuration
+      : NSWorkspace.OpenConfiguration()
+    openConfig.activates = !keepFocus
+
     switch action.type {
     case .application:
-      NSWorkspace.shared.openApplication(
-        at: URL(fileURLWithPath: action.value),
-        configuration: NSWorkspace.OpenConfiguration())
+      var appOpenConfig = openConfig
+      appOpenConfig.activates = true
+      openApplication(action, configuration: appOpenConfig, keepFocus: keepFocus)
     case .url:
-      openURL(action)
+      openURL(action, keepFocus: keepFocus)
     case .command:
       CommandRunner.run(action.value)
     case .folder:
@@ -317,16 +355,117 @@ class Controller {
       print("\(action.type) unknown")
     }
 
-    if window.isVisible {
+    if keepFocus && action.type != .application && window?.isVisible == true {
       window.makeKeyAndOrderFront(nil)
     }
+  }
+
+  private func openApplication(
+    _ action: Action,
+    configuration: NSWorkspace.OpenConfiguration,
+    keepFocus: Bool
+  ) {
+    guard let appURL = applicationURL(for: action.value) else {
+      showAlert(
+        title: "Invalid application",
+        message:
+          "Could not resolve application from value: \(action.value). Use an app path, app name, or bundle identifier."
+      )
+      return
+    }
+
+    if openApplicationUsingOpenCommand(appURL, keepFocus: keepFocus) {
+      guard !keepFocus else { return }
+      DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+        let targetApp = self.runningApplication(for: appURL)
+        _ = targetApp?.activate(options: [.activateIgnoringOtherApps])
+      }
+      return
+    }
+
+    NSWorkspace.shared.openApplication(
+      at: appURL,
+      configuration: configuration
+    ) { [weak self] launchedApp, error in
+      guard let self else { return }
+
+      if let error {
+        DispatchQueue.main.async {
+          self.showAlert(
+            title: "Failed to open application",
+            message: "\(error.localizedDescription)\n\nApplication: \(action.value)"
+          )
+        }
+        return
+      }
+
+      guard !keepFocus else { return }
+      DispatchQueue.main.async {
+        let targetApp = launchedApp ?? self.runningApplication(for: appURL)
+        _ = targetApp?.activate(options: [.activateIgnoringOtherApps])
+      }
+    }
+  }
+
+  private func openApplicationUsingOpenCommand(_ appURL: URL, keepFocus: Bool) -> Bool {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    process.arguments = [appURL.path]
+
+    let stderrPipe = Pipe()
+    process.standardError = stderrPipe
+
+    do {
+      try process.run()
+      process.waitUntilExit()
+      return process.terminationStatus == 0
+    } catch {
+      return false
+    }
+  }
+
+  private func applicationURL(for value: String) -> URL? {
+    let trimmedValue = value.trimmingCharacters(in: .whitespacesAndNewlines)
+    guard !trimmedValue.isEmpty else { return nil }
+
+    let expandedPath = (trimmedValue as NSString).expandingTildeInPath
+    if FileManager.default.fileExists(atPath: expandedPath) {
+      return URL(fileURLWithPath: expandedPath)
+    }
+
+    if let fileURL = URL(string: trimmedValue),
+      fileURL.isFileURL,
+      FileManager.default.fileExists(atPath: fileURL.path)
+    {
+      return fileURL
+    }
+
+    if let appByBundleIdentifier = NSWorkspace.shared.urlForApplication(
+      withBundleIdentifier: trimmedValue)
+    {
+      return appByBundleIdentifier
+    }
+
+    if let appPath = NSWorkspace.shared.fullPath(forApplication: trimmedValue) {
+      return URL(fileURLWithPath: appPath)
+    }
+
+    return nil
+  }
+
+  private func runningApplication(for appURL: URL) -> NSRunningApplication? {
+    guard let bundleIdentifier = Bundle(url: appURL)?.bundleIdentifier else {
+      return nil
+    }
+    return NSRunningApplication.runningApplications(
+      withBundleIdentifier: bundleIdentifier).first
   }
 
   private func clear() {
     userState.clear()
   }
 
-  private func openURL(_ action: Action) {
+  private func openURL(_ action: Action, keepFocus: Bool = false) {
     guard let url = URL(string: action.value) else {
       showAlert(
         title: "Invalid URL", message: "Failed to parse URL: \(action.value)")
@@ -342,14 +481,14 @@ class Controller {
       return
     }
 
-    if scheme == "http" || scheme == "https" {
-      NSWorkspace.shared.open(
-        url,
-        configuration: NSWorkspace.OpenConfiguration())
-    } else {
+    if keepFocus || scheme != "http" && scheme != "https" {
       NSWorkspace.shared.open(
         url,
         configuration: DontActivateConfiguration.shared.configuration)
+    } else {
+      NSWorkspace.shared.open(
+        url,
+        configuration: NSWorkspace.OpenConfiguration())
     }
   }
 

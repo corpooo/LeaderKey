@@ -19,6 +19,7 @@ struct AdvancedPane: View {
   @Default(.holdToStickyEnabled) var holdToStickyEnabled
   @Default(.holdToStickyKeyCode) var holdToStickyKeyCode
   @Default(.holdToStickyKeyDisplay) var holdToStickyKeyDisplay
+  @Default(.keyFallthroughEnabled) var keyFallthroughEnabled
 
   var body: some View {
     Settings.Container(contentWidth: contentWidth) {
@@ -186,6 +187,15 @@ struct AdvancedPane: View {
             "Force English keyboard layout", key: .forceEnglishKeyboardLayout)
           Text(
             "When enabled, letter keys are interpreted in US-English (QWERTY) regardless of your current keyboard layout."
+          )
+          .font(.caption)
+          .foregroundColor(.secondary)
+          .fixedSize(horizontal: false, vertical: true)
+        }
+        VStack(alignment: .leading, spacing: 4) {
+          Defaults.Toggle("Enable key fallthrough", key: .keyFallthroughEnabled)
+          Text(
+            "When a key doesn't match in the current group, search parent groups up to root for a match."
           )
           .font(.caption)
           .foregroundColor(.secondary)

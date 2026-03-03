@@ -7,8 +7,9 @@ var defaultsSuite =
   : .standard
 
 extension Defaults.Keys {
-  static let configDir = Key<String>(
-    "configDir", default: UserConfig.defaultDirectory(), suite: defaultsSuite)
+  static var configDir: Key<String> {
+    Key("configDir", default: UserConfig.defaultDirectory(), suite: defaultsSuite)
+  }
   static let showMenuBarIcon = Key<Bool>(
     "showInMenubar", default: true, suite: defaultsSuite)
   static let forceEnglishKeyboardLayout = Key<Bool>(
@@ -46,6 +47,8 @@ extension Defaults.Keys {
     "holdToStickyKeyCode", default: -1, suite: defaultsSuite)
   static let holdToStickyKeyDisplay = Key<String>(
     "holdToStickyKeyDisplay", default: "", suite: defaultsSuite)
+  static let keyFallthroughEnabled = Key<Bool>(
+    "keyFallthroughEnabled", default: false, suite: defaultsSuite)
 }
 
 enum AutoOpenCheatsheetSetting: String, Defaults.Serializable {

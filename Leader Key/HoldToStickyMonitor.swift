@@ -93,7 +93,9 @@ class HoldToStickyMonitor {
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
 
         // Another key pressed while hold key is pending — immediately activate
-        // and forward the key event to Leader Key
+        // and forward the key event to Leader Key.
+        // While holding, continue forwarding subsequent keyDown events and
+        // suppress passthrough to the currently focused app.
         if keyCode != monitoredKeyCode {
             if holdState == .pending, type == .keyDown,
                 let nsEvent = NSEvent(cgEvent: event)
@@ -102,6 +104,12 @@ class HoldToStickyMonitor {
                 holdTimer = nil
                 holdState = .holding
                 onKeyDown?(nsEvent)
+                return nil
+            }
+            if holdState == .holding {
+                if type == .keyDown, let nsEvent = NSEvent(cgEvent: event) {
+                    onKeyDown?(nsEvent)
+                }
                 return nil
             }
             return Unmanaged.passRetained(event)

@@ -24,6 +24,7 @@ class TestAlertManager: AlertHandler {
 
 final class UserConfigTests: XCTestCase {
   var tempBaseDir: String!
+  var testDefaultDir: String!
   var testAlertManager: TestAlertManager!
   var subject: UserConfig!
   var originalSuite: UserDefaults!
@@ -38,9 +39,19 @@ final class UserConfigTests: XCTestCase {
     // Create a unique temporary directory for each test
     tempBaseDir = NSTemporaryDirectory().appending("/LeaderKeyTests-\(UUID().uuidString)")
     try? FileManager.default.createDirectory(atPath: tempBaseDir, withIntermediateDirectories: true)
+    testDefaultDir = tempBaseDir.appending("/DefaultConfig")
 
     testAlertManager = TestAlertManager()
-    subject = UserConfig(alertHandler: testAlertManager)
+    subject = UserConfig(
+      alertHandler: testAlertManager,
+      defaultDirectoryProvider: { [unowned self] in
+        try? FileManager.default.createDirectory(
+          atPath: self.testDefaultDir,
+          withIntermediateDirectories: true
+        )
+        return self.testDefaultDir
+      }
+    )
 
     // Set the config directory to our temp directory by default
     Defaults[.configDir] = tempBaseDir
@@ -53,6 +64,7 @@ final class UserConfigTests: XCTestCase {
     // Restore original UserDefaults suite
     defaultsSuite = originalSuite
 
+    testDefaultDir = nil
     subject = nil
     super.tearDown()
   }
@@ -67,20 +79,20 @@ final class UserConfigTests: XCTestCase {
   }
 
   func testCreatesDefaultConfigDirIfNotExists() throws {
-    let defaultDir = UserConfig.defaultDirectory()
-    // Remove both directory and config file
-    try? FileManager.default.removeItem(atPath: defaultDir)
-    try? FileManager.default.removeItem(
-      atPath: (defaultDir as NSString).appendingPathComponent("config.json"))
-    Defaults[.configDir] = defaultDir
+    // Use a subdirectory of temp that doesn't exist yet
+    let freshDir = tempBaseDir.appending("/SubDir")
+    try? FileManager.default.removeItem(atPath: freshDir)
+    Defaults[.configDir] = freshDir
 
+    // ensureAndLoad should detect missing dir, reset to default, and bootstrap
     subject.ensureAndLoad()
     waitForConfigLoad()
 
-    XCTAssertTrue(FileManager.default.fileExists(atPath: defaultDir))
+    // Config dir is reset to the test default dir, which is bootstrapped safely.
+    XCTAssertEqual(Defaults[.configDir], testDefaultDir)
     XCTAssertTrue(subject.exists)
-    XCTAssertEqual(testAlertManager.shownAlerts.count, 0)
-    XCTAssertNotEqual(subject.root, emptyRoot)  // Verify the config was parsed successfully
+    XCTAssertEqual(testAlertManager.shownAlerts.count, 1)
+    XCTAssertNotEqual(subject.root, emptyRoot)
   }
 
   func testResetsToDefaultDirWhenCustomDirDoesNotExist() throws {
@@ -90,7 +102,8 @@ final class UserConfigTests: XCTestCase {
     subject.ensureAndLoad()
     waitForConfigLoad()
 
-    XCTAssertEqual(Defaults[.configDir], UserConfig.defaultDirectory())
+    // Should have reset to the test default directory and shown a warning
+    XCTAssertEqual(Defaults[.configDir], testDefaultDir)
     XCTAssertEqual(testAlertManager.shownAlerts.count, 1)
     XCTAssertEqual(testAlertManager.shownAlerts[0].style, .warning)
     XCTAssertTrue(
@@ -99,11 +112,10 @@ final class UserConfigTests: XCTestCase {
   }
 
   func testShowsAlertWhenConfigFileFailsToParse() throws {
-    // First ensure we're in the default directory since custom dirs are no longer supported
-    Defaults[.configDir] = UserConfig.defaultDirectory()
-
+    // Write invalid JSON to the temp config directory (not the real one)
     let invalidJSON = "{ invalid json }"
-    try invalidJSON.write(to: subject.url, atomically: true, encoding: .utf8)
+    let configPath = (tempBaseDir as NSString).appendingPathComponent("config.json")
+    try invalidJSON.write(toFile: configPath, atomically: true, encoding: .utf8)
 
     subject.ensureAndLoad()
     waitForConfigLoad()
