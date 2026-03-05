@@ -73,6 +73,7 @@ private class OutlineController: NSObject, NSOutlineViewDataSource, NSOutlineVie
   private var validationCancellable: AnyCancellable?
   /// Flags the next render call to skip a full reload because we already mutated `rootNode` locally.
   private var skipNextRender = false
+  private var keyboardMonitor: Any?
 
   override init() {
     super.init()
@@ -108,9 +109,17 @@ private class OutlineController: NSObject, NSOutlineViewDataSource, NSOutlineVie
       nc.addObserver(forName: .lkSortAZ, object: nil, queue: .main) { [weak self] _ in
         self?.sortAll()
       })
+
+    keyboardMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+      guard let self else { return event }
+      return self.handleKeyboardEvent(event) ? nil : event
+    }
   }
 
   deinit {
+    if let keyboardMonitor {
+      NSEvent.removeMonitor(keyboardMonitor)
+    }
     for o in observers {
       NotificationCenter.default.removeObserver(o)
     }
@@ -495,6 +504,212 @@ private class OutlineController: NSObject, NSOutlineViewDataSource, NSOutlineVie
     case .group(let g): return g.key ?? ""
     }
   }
+
+  // MARK: Keyboard-first editing
+  private func handleKeyboardEvent(_ event: NSEvent) -> Bool {
+    guard shouldHandleKeyboardEvent(event) else { return false }
+    if isInlineEditorFocused() || isAnyRowCapturingKeyInput() { return false }
+
+    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    let key = event.charactersIgnoringModifiers?.lowercased() ?? ""
+
+    if flags == [.command] {
+      switch key {
+      case "a":
+        addRootAction()
+        return true
+      case "g":
+        addRootGroup()
+        return true
+      default:
+        return false
+      }
+    }
+
+    if flags == [.option] {
+      switch key {
+      case "a":
+        addToFocusedGroup(kind: .action)
+        return true
+      case "g":
+        addToFocusedGroup(kind: .group)
+        return true
+      case "l":
+        focusedEditableRow()?.beginInlineLabelEdit()
+        return true
+      case "k":
+        focusedEditableRow()?.beginKeyCaptureFromKeyboard()
+        return true
+      case "t":
+        focusedEditableRow()?.cycleActionType()
+        return true
+      case "p":
+        focusedEditableRow()?.editPrimaryValue()
+        return true
+      default:
+        return false
+      }
+    }
+
+    guard flags.isEmpty else { return false }
+    switch key {
+    case "j":
+      moveSelection(by: 1)
+      return true
+    case "k":
+      moveSelection(by: -1)
+      return true
+    case "h":
+      moveSelectionLeft()
+      return true
+    case "l":
+      moveSelectionRight()
+      return true
+    default:
+      return false
+    }
+  }
+
+  private func shouldHandleKeyboardEvent(_ event: NSEvent) -> Bool {
+    guard let window = outline.window, event.window === window else { return false }
+    return focusIsWithinOutline(window)
+  }
+
+  private func focusIsWithinOutline(_ window: NSWindow) -> Bool {
+    guard let firstResponder = window.firstResponder else { return false }
+    if firstResponder === outline { return true }
+    if let responderView = firstResponder as? NSView {
+      return responderView.isDescendant(of: outline)
+    }
+    if let textView = firstResponder as? NSTextView,
+      let delegateView = textView.delegate as? NSView
+    {
+      return delegateView.isDescendant(of: outline)
+    }
+    return false
+  }
+
+  private func isInlineEditorFocused() -> Bool {
+    guard let textView = outline.window?.firstResponder as? NSTextView else { return false }
+    return textView.isFieldEditor
+  }
+
+  private func isAnyRowCapturingKeyInput() -> Bool {
+    let rows = outline.numberOfRows
+    guard rows > 0 else { return false }
+    for row in 0..<rows {
+      guard let view = outline.view(atColumn: 0, row: row, makeIfNecessary: false) as? KeyboardEditableRow
+      else { continue }
+      if view.isCapturingKeyInput { return true }
+    }
+    return false
+  }
+
+  private func focusedEditableRow() -> KeyboardEditableRow? {
+    ensureSelection()
+    guard outline.selectedRow >= 0 else { return nil }
+    return outline.view(atColumn: 0, row: outline.selectedRow, makeIfNecessary: false) as? KeyboardEditableRow
+  }
+
+  private func ensureSelection() {
+    if outline.selectedRow >= 0 { return }
+    guard outline.numberOfRows > 0 else { return }
+    selectRow(0)
+  }
+
+  private func selectRow(_ row: Int) {
+    guard row >= 0, row < outline.numberOfRows else { return }
+    outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+    outline.scrollRowToVisible(row)
+  }
+
+  private func moveSelection(by delta: Int) {
+    guard outline.numberOfRows > 0 else { return }
+    if outline.selectedRow < 0 {
+      selectRow(0)
+      return
+    }
+    let target = max(0, min(outline.numberOfRows - 1, outline.selectedRow + delta))
+    selectRow(target)
+  }
+
+  private func moveSelectionLeft() {
+    ensureSelection()
+    let row = outline.selectedRow
+    guard row >= 0, let node = outline.item(atRow: row) as? EditorNode else { return }
+    if node.isGroup && outline.isItemExpanded(node) {
+      outline.collapseItem(node, collapseChildren: false)
+      saveCurrentExpandedState()
+      return
+    }
+    guard let parent = node.parent, parent !== rootNode else { return }
+    let parentRow = outline.row(forItem: parent)
+    if parentRow >= 0 { selectRow(parentRow) }
+  }
+
+  private func moveSelectionRight() {
+    ensureSelection()
+    let row = outline.selectedRow
+    guard row >= 0, let node = outline.item(atRow: row) as? EditorNode, node.isGroup else { return }
+    if !outline.isItemExpanded(node) {
+      outline.expandItem(node, expandChildren: false)
+      saveCurrentExpandedState()
+      return
+    }
+    guard let firstChild = node.children.first else { return }
+    let childRow = outline.row(forItem: firstChild)
+    if childRow >= 0 { selectRow(childRow) }
+  }
+
+  private func addRootAction() {
+    let node = EditorNode.action(Action(key: "", type: .application, value: ""), parent: rootNode)
+    rootNode.children.append(node)
+    outline.reloadData()
+    if let row = row(for: node) { selectRow(row) }
+    propagateRootChange()
+  }
+
+  private func addRootGroup() {
+    let node = EditorNode.group(Group(key: "", actions: []), parent: rootNode)
+    rootNode.children.append(node)
+    outline.reloadData()
+    if let row = row(for: node) { selectRow(row) }
+    propagateRootChange()
+  }
+
+  private enum ChildKind {
+    case action
+    case group
+  }
+
+  private func addToFocusedGroup(kind: ChildKind) {
+    ensureSelection()
+    let selectedRow = outline.selectedRow
+    guard selectedRow >= 0,
+      let groupNode = outline.item(atRow: selectedRow) as? EditorNode,
+      groupNode.isGroup
+    else { return }
+
+    let inserted: EditorNode
+    switch kind {
+    case .action:
+      inserted = EditorNode.action(Action(key: "", type: .application, value: ""), parent: groupNode)
+    case .group:
+      inserted = EditorNode.group(Group(key: "", actions: []), parent: groupNode)
+    }
+    groupNode.children.append(inserted)
+
+    outline.reloadData()
+    outline.expandItem(groupNode, expandChildren: false)
+    saveCurrentExpandedState()
+    if let insertedRow = row(for: inserted) { selectRow(insertedRow) }
+    propagateRootChange()
+  }
+
+  private func row(for node: EditorNode) -> Int? {
+    let row = outline.row(forItem: node)
+    return row >= 0 ? row : nil
+  }
 }
 
 // MARK: - Row Views
@@ -504,7 +719,91 @@ private enum EditorPayload {
   case group(Group)
 }
 
-private class ActionCellView: NSTableCellView, NSWindowDelegate {
+private final class InsetTextFieldCell: NSTextFieldCell {
+  private let horizontalInset: CGFloat = 10
+  private let verticalInset: CGFloat = 3
+
+  override func drawingRect(forBounds rect: NSRect) -> NSRect {
+    rect.insetBy(dx: horizontalInset, dy: verticalInset)
+  }
+
+  override func titleRect(forBounds rect: NSRect) -> NSRect {
+    drawingRect(forBounds: rect)
+  }
+
+  override func edit(
+    withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?,
+    event: NSEvent?
+  ) {
+    super.edit(
+      withFrame: titleRect(forBounds: rect),
+      in: controlView,
+      editor: textObj,
+      delegate: delegate,
+      event: event
+    )
+  }
+
+  override func select(
+    withFrame rect: NSRect, in controlView: NSView, editor textObj: NSText, delegate: Any?,
+    start selStart: Int, length selLength: Int
+  ) {
+    super.select(
+      withFrame: titleRect(forBounds: rect),
+      in: controlView,
+      editor: textObj,
+      delegate: delegate,
+      start: selStart,
+      length: selLength
+    )
+  }
+}
+
+private final class InlineEditorTextField: NSTextField {
+  override class var cellClass: AnyClass? {
+    get { InsetTextFieldCell.self }
+    set {}
+  }
+
+  override var intrinsicContentSize: NSSize {
+    var size = super.intrinsicContentSize
+    size.height = max(size.height, 34)
+    return size
+  }
+
+  override func performKeyEquivalent(with event: NSEvent) -> Bool {
+    let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+    guard flags == [.command] else { return super.performKeyEquivalent(with: event) }
+    guard let key = event.charactersIgnoringModifiers?.lowercased() else {
+      return super.performKeyEquivalent(with: event)
+    }
+
+    switch key {
+    case "x":
+      return NSApp.sendAction(#selector(NSText.cut(_:)), to: nil, from: self)
+    case "c":
+      return NSApp.sendAction(#selector(NSText.copy(_:)), to: nil, from: self)
+    case "v":
+      return NSApp.sendAction(#selector(NSText.paste(_:)), to: nil, from: self)
+    case "a":
+      return NSApp.sendAction(#selector(NSText.selectAll(_:)), to: nil, from: self)
+    case "z":
+      return NSApp.sendAction(Selector(("undo:")), to: nil, from: self)
+    default:
+      return super.performKeyEquivalent(with: event)
+    }
+  }
+}
+
+private protocol KeyboardEditableRow: AnyObject {
+  var isCapturingKeyInput: Bool { get }
+  func beginInlineLabelEdit()
+  func beginKeyCaptureFromKeyboard()
+  func cycleActionType()
+  func editPrimaryValue()
+}
+
+private class ActionCellView: NSTableCellView, NSWindowDelegate, NSTextFieldDelegate, KeyboardEditableRow {
   private enum Layout {
     static let keyWidth: CGFloat = 28
     static let typeWidth: CGFloat = 110
@@ -518,8 +817,11 @@ private class ActionCellView: NSTableCellView, NSWindowDelegate {
   private var typePopup = NSPopUpButton()
   private var iconButton = NSButton()
   private var valueStack = NSStackView()
-  private var labelButton = NSButton()
+  private var labelField = InlineEditorTextField()
   private var moreBtn = NSButton()
+  private weak var inlineValueField: NSTextField?
+  private weak var valuePickerButton: NSButton?
+  private weak var valuePromptButton: NSButton?
 
   private var onChange: ((EditorPayload) -> Void)?
   private var onDelete: (() -> Void)?
@@ -552,10 +854,19 @@ private class ActionCellView: NSTableCellView, NSWindowDelegate {
     typePopup.widthAnchor.constraint(equalToConstant: Layout.typeWidth).isActive = true
     valueStack.orientation = .horizontal
     valueStack.spacing = 6
-    labelButton.bezelStyle = .rounded
-    labelButton.controlSize = .regular
+    labelField.isEditable = true
+    labelField.isBordered = false
+    labelField.isBezeled = false
+    labelField.controlSize = .regular
+    labelField.isSelectable = true
+    labelField.placeholderString = "Label"
+    labelField.lineBreakMode = .byTruncatingTail
+    labelField.delegate = self
+    labelField.target = self
+    labelField.action = #selector(handleLabelCommit)
+    Self.styleInlineField(labelField)
     do {  // Ensure minimum width to prevent text from being cut off
-      let minConstraint = labelButton.widthAnchor.constraint(greaterThanOrEqualToConstant: 60)
+      let minConstraint = labelField.widthAnchor.constraint(greaterThanOrEqualToConstant: 60)
       minConstraint.priority = .required
       minConstraint.isActive = true
     }
@@ -569,13 +880,13 @@ private class ActionCellView: NSTableCellView, NSWindowDelegate {
     iconButton.imageScaling = .scaleProportionallyDown
     iconButton.widthAnchor.constraint(equalToConstant: Layout.iconButtonWidth).isActive = true
 
-    for view in [keyButton, typePopup, iconButton, labelButton, moreBtn] {
+    for view in [keyButton, typePopup, iconButton, labelField, moreBtn] {
       view.makeRigid()
     }
 
     valueStack.makeFlex()
 
-    for view in [keyButton, typePopup, iconButton, valueStack, labelButton, moreBtn] {
+    for view in [keyButton, typePopup, iconButton, valueStack, labelField, moreBtn] {
       container.addArrangedSubview(view)
     }
     addSubview(container)
@@ -591,15 +902,6 @@ private class ActionCellView: NSTableCellView, NSWindowDelegate {
     keyButton.targetClosure { [weak self] in self?.beginKeyCapture() }
     typePopup.targetClosure { [weak self] in self?.propagate() }
     iconButton.targetClosure { [weak self] in self?.showIconMenu(anchor: self?.iconButton) }
-    labelButton.targetClosure { [weak self] in
-      guard let self else { return }
-      self.promptText(title: "Label", initial: self.currentAction()?.label ?? "") { text in
-        guard var a = self.currentAction() else { return }
-        a.label = text.isEmpty ? nil : text
-        self.onChange?(.action(a))
-        self.updateButtons(for: a)
-      }
-    }
     moreBtn.targetClosure { [weak self] in self?.showMoreMenu(anchor: self?.moreBtn) }
   }
 
@@ -639,11 +941,7 @@ private class ActionCellView: NSTableCellView, NSWindowDelegate {
     keyButton.title =
       (action.key?.isEmpty ?? true)
       ? "Key" : (KeyMaps.glyph(for: action.key ?? "") ?? action.key ?? "Key")
-    let isPlaceholder = (action.label?.isEmpty ?? true)
-    ConfigEditorUI.setButtonTitle(
-      labelButton,
-      text: isPlaceholder ? "Label" : (action.label ?? "Label"),
-      placeholder: isPlaceholder)
+    labelField.stringValue = action.label ?? ""
   }
 
   private func updateValidationStyle(_ error: ValidationErrorType?) {
@@ -676,6 +974,9 @@ private class ActionCellView: NSTableCellView, NSWindowDelegate {
 
   private func rebuildValue(for action: Action) {
     while let v = valueStack.arrangedSubviews.first { v.removeFromSuperview() }
+    inlineValueField = nil
+    valuePickerButton = nil
+    valuePromptButton = nil
     let descriptor = ValueDescriptor.forAction(action)
     switch descriptor.kind {
     case .picker(let picker):
@@ -691,10 +992,19 @@ private class ActionCellView: NSTableCellView, NSWindowDelegate {
         self?.rebuildValue(for: a)
         self?.updateIcon(for: a)
       }
+      valuePickerButton = choose
       let label = Self.valueLabel(text: descriptor.display)
       for v in [choose, label] { valueStack.addArrangedSubview(v) }
+    case .inline(let placeholder):
+      let field = Self.inlineTextField(text: descriptor.display, placeholder: placeholder)
+      field.delegate = self
+      field.target = self
+      field.action = #selector(handleInlineValueCommit)
+      inlineValueField = field
+      valueStack.addArrangedSubview(field)
     case .prompt(let promptTitle):
       let edit = Self.editButton(width: Layout.chooserWidth)
+      valuePromptButton = edit
       edit.targetClosure { [weak self] in
         self?.promptText(title: promptTitle, initial: action.value) { text in
           guard var a = self?.currentAction() else { return }
@@ -722,6 +1032,7 @@ private class ActionCellView: NSTableCellView, NSWindowDelegate {
     }
     enum Kind {
       case picker(PickerConfig)
+      case inline(String)
       case prompt(String)
     }
 
@@ -747,7 +1058,7 @@ private class ActionCellView: NSTableCellView, NSWindowDelegate {
       case .command:
         return ValueDescriptor(kind: .prompt("Command"), display: action.value)
       case .url:
-        return ValueDescriptor(kind: .prompt("URL"), display: action.value)
+        return ValueDescriptor(kind: .inline("URL"), display: action.value)
       default:
         return ValueDescriptor(kind: .prompt("Value"), display: action.value)
       }
@@ -773,13 +1084,44 @@ private class ActionCellView: NSTableCellView, NSWindowDelegate {
     return button
   }
 
+  private static func inlineTextField(text: String, placeholder: String) -> NSTextField {
+    let field = InlineEditorTextField(string: text)
+    field.isBordered = false
+    field.isBezeled = false
+    field.controlSize = .regular
+    field.isSelectable = true
+    field.placeholderString = placeholder
+    field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+    field.setContentHuggingPriority(.defaultLow, for: .horizontal)
+    styleInlineField(field)
+    let constraint = field.widthAnchor.constraint(greaterThanOrEqualToConstant: Layout.valueWidth)
+    constraint.priority = .defaultLow
+    constraint.isActive = true
+    return field
+  }
+
+  private static func styleInlineField(_ field: NSTextField) {
+    field.wantsLayer = true
+    field.layer?.cornerRadius = 6
+    field.layer?.borderWidth = 1
+    field.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
+    field.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.65)
+    field.focusRingType = .default
+    field.font = NSFont.systemFont(ofSize: 14, weight: .regular)
+    field.heightAnchor.constraint(equalToConstant: 34).isActive = true
+  }
+
   private func currentAction() -> Action? {
     guard case .action(var a) = node?.kind else { return nil }
     let keyTitle = keyButton.title
     a.key = (keyTitle == "Key" || keyTitle.isEmpty) ? nil : keyTitle
     a.type = Self.type(for: typePopup.indexOfSelectedItem)
-    let labelTitle = labelButton.title
-    a.label = (labelTitle == "Label" || labelTitle.isEmpty) ? nil : labelTitle
+    let labelText = labelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    a.label = labelText.isEmpty ? nil : labelText
+    if a.type == .url {
+      let valueText = inlineValueField?.stringValue ?? a.value
+      a.value = valueText
+    }
     return a
   }
 
@@ -842,6 +1184,31 @@ private class ActionCellView: NSTableCellView, NSWindowDelegate {
     if response == .alertFirstButtonReturn { onOK(field.stringValue) }
   }
 
+  @objc private func handleLabelCommit() {
+    guard var action = currentAction() else { return }
+    let labelText = labelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    action.label = labelText.isEmpty ? nil : labelText
+    onChange?(.action(action))
+    updateButtons(for: action)
+  }
+
+  @objc private func handleInlineValueCommit() {
+    guard var action = currentAction(), action.type == .url else { return }
+    action.value = inlineValueField?.stringValue ?? action.value
+    onChange?(.action(action))
+  }
+
+  func controlTextDidChange(_ obj: Notification) {
+    guard let editedField = obj.object as? NSTextField else { return }
+    if editedField === labelField {
+      handleLabelCommit()
+      return
+    }
+    if editedField === inlineValueField {
+      handleInlineValueCommit()
+    }
+  }
+
   // MARK: Key capture logic (replicates SwiftUI KeyButton UX)
   private var keyMonitor: Any?
   private func beginKeyCapture() {
@@ -861,6 +1228,42 @@ private class ActionCellView: NSTableCellView, NSWindowDelegate {
         onClear: { self.endKeyCapture(set: nil) }
       )
       return handled ? nil : event
+    }
+  }
+
+  var isCapturingKeyInput: Bool { keyMonitor != nil }
+
+  func beginInlineLabelEdit() {
+    window?.makeFirstResponder(labelField)
+    labelField.selectText(nil)
+  }
+
+  func beginKeyCaptureFromKeyboard() {
+    beginKeyCapture()
+  }
+
+  func cycleActionType() {
+    let next = (typePopup.indexOfSelectedItem + 1) % 4
+    typePopup.selectItem(at: next)
+    propagate()
+  }
+
+  func editPrimaryValue() {
+    guard let action = currentAction() else { return }
+    switch action.type {
+    case .url:
+      if let field = inlineValueField {
+        window?.makeFirstResponder(field)
+        field.selectText(nil)
+      } else {
+        rebuildValue(for: action)
+      }
+    case .application, .folder:
+      valuePickerButton?.performClick(nil)
+    case .command:
+      valuePromptButton?.performClick(nil)
+    default:
+      break
     }
   }
 
@@ -949,7 +1352,7 @@ private class ActionCellView: NSTableCellView, NSWindowDelegate {
   // symbol picker presenting delegated to shared helper
 }
 
-private class GroupCellView: NSTableCellView, NSWindowDelegate {
+private class GroupCellView: NSTableCellView, NSWindowDelegate, NSTextFieldDelegate, KeyboardEditableRow {
   private enum Layout {
     static let keyWidth: CGFloat = 28
     static let labelWidth: CGFloat = 160
@@ -958,7 +1361,7 @@ private class GroupCellView: NSTableCellView, NSWindowDelegate {
   }
   private var keyButton = NSButton()
   private var iconButton = NSButton()
-  private var labelButton = NSButton()
+  private var labelField = InlineEditorTextField()
   private var globalShortcutView: NSView?
   private var addActionBtn = NSButton()
   private var addGroupBtn = NSButton()
@@ -994,8 +1397,17 @@ private class GroupCellView: NSTableCellView, NSWindowDelegate {
     iconButton.imagePosition = .imageOnly
     iconButton.imageScaling = .scaleProportionallyDown
     iconButton.widthAnchor.constraint(equalToConstant: Layout.iconButtonWidth).isActive = true
-    labelButton.bezelStyle = .rounded
-    labelButton.controlSize = .regular
+    labelField.isEditable = true
+    labelField.isBordered = false
+    labelField.isBezeled = false
+    labelField.controlSize = .regular
+    labelField.isSelectable = true
+    labelField.placeholderString = "Label"
+    labelField.lineBreakMode = .byTruncatingTail
+    labelField.delegate = self
+    labelField.target = self
+    labelField.action = #selector(handleLabelCommit)
+    Self.styleInlineField(labelField)
 
     addActionBtn.title = "+ Action"
     addActionBtn.bezelStyle = .rounded
@@ -1019,7 +1431,7 @@ private class GroupCellView: NSTableCellView, NSWindowDelegate {
     globalShortcutView = globalShortcutContainer
 
     for view in [
-      keyButton, iconButton, addActionBtn, addGroupBtn, labelButton, moreBtn,
+      keyButton, iconButton, addActionBtn, addGroupBtn, labelField, moreBtn,
       globalShortcutContainer,
     ] {
       view.makeRigid()
@@ -1032,7 +1444,7 @@ private class GroupCellView: NSTableCellView, NSWindowDelegate {
     }
     container.addArrangedSubview(globalShortcutContainer)
 
-    for v in [spacer2, addActionBtn, addGroupBtn, labelButton, moreBtn] {
+    for v in [spacer2, addActionBtn, addGroupBtn, labelField, moreBtn] {
       container.addArrangedSubview(v)
     }
     addSubview(container)
@@ -1045,14 +1457,6 @@ private class GroupCellView: NSTableCellView, NSWindowDelegate {
 
     keyButton.targetClosure { [weak self] in self?.beginKeyCapture() }
     iconButton.targetClosure { [weak self] in self?.showIconMenu(anchor: self?.iconButton) }
-    labelButton.targetClosure { [weak self] in
-      self?.prompt(title: "Label", initial: self?.currentGroup()?.label ?? "") { text in
-        guard var g = self?.currentGroup() else { return }
-        g.label = text.isEmpty ? nil : text
-        self?.onChange?(.group(g))
-        self?.updateButtons(for: g)
-      }
-    }
     addActionBtn.targetClosure { [weak self] in self?.onAddAction?() }
     addGroupBtn.targetClosure { [weak self] in self?.onAddGroup?() }
     moreBtn.targetClosure { [weak self] in self?.showMoreMenu(anchor: self?.moreBtn) }
@@ -1086,11 +1490,7 @@ private class GroupCellView: NSTableCellView, NSWindowDelegate {
     keyButton.title =
       (group.key?.isEmpty ?? true)
       ? "Group Key" : (KeyMaps.glyph(for: group.key ?? "") ?? group.key ?? "Group Key")
-    let isPlaceholder = (group.label?.isEmpty ?? true)
-    ConfigEditorUI.setButtonTitle(
-      labelButton,
-      text: isPlaceholder ? "Label" : (group.label ?? "Label"),
-      placeholder: isPlaceholder)
+    labelField.stringValue = group.label ?? ""
     updateGlobalShortcutView(for: group)
   }
 
@@ -1160,18 +1560,17 @@ private class GroupCellView: NSTableCellView, NSWindowDelegate {
     if case .group(let g) = node?.kind { return g } else { return nil }
   }
 
-  private func prompt(title: String, initial: String?, onOK: @escaping (String) -> Void) {
-    let alert = NSAlert()
-    alert.messageText = title
-    alert.addButton(withTitle: "OK")
-    alert.addButton(withTitle: "Cancel")
-    let field = NSTextField(string: initial ?? "")
-    field.frame = NSRect(x: 0, y: 0, width: 260, height: 22)
-    alert.accessoryView = field
-    // Focus and select all when the dialog opens
-    alert.window.initialFirstResponder = field
-    field.selectText(nil)
-    if alert.runModal() == .alertFirstButtonReturn { onOK(field.stringValue) }
+  @objc private func handleLabelCommit() {
+    guard var group = currentGroup() else { return }
+    let labelText = labelField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+    group.label = labelText.isEmpty ? nil : labelText
+    onChange?(.group(group))
+    updateButtons(for: group)
+  }
+
+  func controlTextDidChange(_ obj: Notification) {
+    guard let editedField = obj.object as? NSTextField, editedField === labelField else { return }
+    handleLabelCommit()
   }
 
   // MARK: Key capture (group)
@@ -1194,6 +1593,31 @@ private class GroupCellView: NSTableCellView, NSWindowDelegate {
       )
       return handled ? nil : event
     }
+  }
+
+  var isCapturingKeyInput: Bool { keyMonitor != nil }
+
+  func beginInlineLabelEdit() {
+    window?.makeFirstResponder(labelField)
+    labelField.selectText(nil)
+  }
+
+  func beginKeyCaptureFromKeyboard() {
+    beginKeyCapture()
+  }
+
+  func cycleActionType() {}
+  func editPrimaryValue() {}
+
+  private static func styleInlineField(_ field: NSTextField) {
+    field.wantsLayer = true
+    field.layer?.cornerRadius = 6
+    field.layer?.borderWidth = 1
+    field.layer?.borderColor = NSColor.separatorColor.withAlphaComponent(0.45).cgColor
+    field.backgroundColor = NSColor.controlBackgroundColor.withAlphaComponent(0.65)
+    field.focusRingType = .default
+    field.font = NSFont.systemFont(ofSize: 14, weight: .regular)
+    field.heightAnchor.constraint(equalToConstant: 34).isActive = true
   }
 
   private func endKeyCapture(set char: String?) {

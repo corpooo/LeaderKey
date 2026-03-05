@@ -21,6 +21,7 @@ class AppDelegate: NSObject, NSApplicationDelegate,
   let config = UserConfig()
 
   var state: UserState!
+  private weak var regularMainMenu: NSMenu?
   @IBOutlet var updaterController: SPUStandardUpdaterController!
 
   lazy var settingsWindowController = SettingsWindowController(
@@ -48,7 +49,7 @@ class AppDelegate: NSObject, NSApplicationDelegate,
     guard !isRunningTests() else { return }
 
     UNUserNotificationCenter.current().delegate = self
-    NSApp.mainMenu = MainMenu()
+    regularMainMenu = NSApp.mainMenu
 
     config.ensureAndLoad()
     state = UserState(userConfig: config)
@@ -73,8 +74,10 @@ class AppDelegate: NSObject, NSApplicationDelegate,
     Task {
       for await value in Defaults.updates(.showMenuBarIcon) {
         if value {
-          self.statusItem.enable()
-        } else {
+          if !self.statusItem.isEnabled {
+            self.statusItem.enable()
+          }
+        } else if self.statusItem.isEnabled {
           self.statusItem.disable()
         }
       }
@@ -310,6 +313,9 @@ class AppDelegate: NSObject, NSApplicationDelegate,
 
   private func showSettings() {
     // Behave like a normal app while Settings is open
+    if NSApp.mainMenu == nil {
+      NSApp.mainMenu = regularMainMenu
+    }
     NSApp.setActivationPolicy(.regular)
     settingsWindowController.show()
     NSApp.activate(ignoringOtherApps: true)
@@ -321,6 +327,9 @@ class AppDelegate: NSObject, NSApplicationDelegate,
     guard let win = notification.object as? NSWindow,
       win == settingsWindowController.window
     else { return }
+
+    // Accessory apps should not keep a detached app main menu.
+    NSApp.mainMenu = nil
     NSApp.setActivationPolicy(.accessory)
   }
 

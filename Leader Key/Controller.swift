@@ -131,7 +131,11 @@ class Controller {
     }
   }
 
-  func handleKey(_ key: String, withModifiers modifiers: NSEvent.ModifierFlags? = nil, execute: Bool = true) {
+  func handleKey(
+    _ key: String,
+    withModifiers modifiers: NSEvent.ModifierFlags? = nil,
+    execute: Bool = true
+  ) {
     if key == "?" {
       showCheatsheet()
       return
@@ -143,15 +147,18 @@ class Controller {
     if handleHit(hit, withModifiers: modifiers, execute: execute) {
       // Direct match in current group
     } else if Defaults[.keyFallthroughEnabled],
-              !userState.navigationPath.isEmpty,
-              let fallthrough_ = findFallthroughMatch(for: key) {
+      !userState.navigationPath.isEmpty,
+      let fallthroughMatch = findFallthroughMatch(for: key)
+    {
       // Reset navigation to ancestor level
-      if fallthrough_.ancestorIndex < 0 {
+      if fallthroughMatch.ancestorIndex < 0 {
         userState.navigationPath = []
       } else {
-        userState.navigationPath = Array(userState.navigationPath.prefix(fallthrough_.ancestorIndex + 1))
+        userState.navigationPath = Array(
+          userState.navigationPath.prefix(fallthroughMatch.ancestorIndex + 1)
+        )
       }
-      _ = handleHit(fallthrough_.hit, withModifiers: modifiers, execute: execute)
+      _ = handleHit(fallthroughMatch.hit, withModifiers: modifiers, execute: execute)
     } else {
       window?.notFound()
     }
@@ -177,11 +184,16 @@ class Controller {
   }
 
   @discardableResult
-  private func handleHit(_ hit: ActionOrGroup?, withModifiers modifiers: NSEvent.ModifierFlags?, execute: Bool) -> Bool {
+  private func handleHit(
+    _ hit: ActionOrGroup?,
+    withModifiers modifiers: NSEvent.ModifierFlags?,
+    execute: Bool
+  ) -> Bool {
     switch hit {
     case .action(let action):
       if execute {
-        let isStickyMode = isInHoldToStickyMode || (modifiers.map { isInStickyMode($0) } ?? false)
+        let isStickyMode =
+          isInHoldToStickyMode || (modifiers.map { isInStickyMode($0) } ?? false)
         let shouldKeepFocus = isStickyMode
         if shouldKeepFocus {
           runAction(action, keepFocus: true)
@@ -334,14 +346,15 @@ class Controller {
   }
 
   private func runAction(_ action: Action, keepFocus: Bool = false) {
-    var openConfig = keepFocus
+    let openConfig =
+      keepFocus
       ? DontActivateConfiguration.shared.configuration
       : NSWorkspace.OpenConfiguration()
     openConfig.activates = !keepFocus
 
     switch action.type {
     case .application:
-      var appOpenConfig = openConfig
+      let appOpenConfig = openConfig
       appOpenConfig.activates = true
       openApplication(action, configuration: appOpenConfig, keepFocus: keepFocus)
     case .url:
@@ -446,8 +459,17 @@ class Controller {
       return appByBundleIdentifier
     }
 
-    if let appPath = NSWorkspace.shared.fullPath(forApplication: trimmedValue) {
-      return URL(fileURLWithPath: appPath)
+    let appName = trimmedValue.hasSuffix(".app") ? trimmedValue : "\(trimmedValue).app"
+    let searchPaths = [
+      "/Applications",
+      "/System/Applications",
+      ("~/Applications" as NSString).expandingTildeInPath,
+    ]
+    for basePath in searchPaths {
+      let candidatePath = (basePath as NSString).appendingPathComponent(appName)
+      if FileManager.default.fileExists(atPath: candidatePath) {
+        return URL(fileURLWithPath: candidatePath)
+      }
     }
 
     return nil
@@ -458,7 +480,8 @@ class Controller {
       return nil
     }
     return NSRunningApplication.runningApplications(
-      withBundleIdentifier: bundleIdentifier).first
+      withBundleIdentifier: bundleIdentifier
+    ).first
   }
 
   private func clear() {

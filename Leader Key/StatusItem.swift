@@ -15,6 +15,9 @@ class StatusItem {
   }
 
   var statusItem: NSStatusItem?
+  var isEnabled: Bool {
+    statusItem != nil
+  }
   private var cancellables = Set<AnyCancellable>()
 
   var handlePreferences: (() -> Void)?
@@ -24,6 +27,11 @@ class StatusItem {
   var handleCheckForUpdates: (() -> Void)?
 
   func enable() {
+    guard statusItem == nil else {
+      updateStatusItemAppearance()
+      return
+    }
+
     statusItem = NSStatusBar.system.statusItem(
       withLength: NSStatusItem.squareLength)
 
@@ -108,6 +116,7 @@ class StatusItem {
   func disable() {
     guard let item = statusItem else { return }
 
+    item.menu = nil
     cancellables.removeAll()
     NSStatusBar.system.removeStatusItem(item)
     statusItem = nil
